@@ -1,0 +1,85 @@
+# genpic — qwen endpoint
+#
+# 通用生图 / 多图编辑 · Qwen-Image-2.1 7B (阿里, 2026-09-20 发布)
+#
+# 一个权重同时做：文生图 + 编辑 + 最多 10 张参考图 + 透明 PNG + 原生 2K
+#
+# 为什么必须升级 ComfyUI：
+#   基础镜像是 v0.34.0 (2026-08-25)，早于 Qwen-Image-2.1 发布 (2026-09-20)。
+#   v0.34.0 只有 TextEncodeQwenImageEdit / ...EditPlus（那是 2025 年的
+#   Qwen-Image-Edit / Edit-2509 用的），没有 2.1 的节点。
+#   Qwen-Image-2.1 节点 (TextEncodeQwenImage21 / QwenImage21Cache) 在
+#   v0.40.0 里才有 —— 已在容器里实测确认。
+#
+#   注意：不能用 `comfy update`，它内部跑 git pull，而镜像是 detached HEAD
+#   （HEAD detached at v0.34.0），git pull 必然失败。必须显式 fetch + checkout。
+#
+# 为什么用 INT8 ConvRot 而不是官方 BF16：
+#   BF16 权重 31.6GB -> 放不进 24GB 卡
+#   INT8 ConvRot 权重 16.1GB -> 24GB 稳
+#   官方 ComfyUI 模板默认就是 INT8 ConvRot 组合，精度损失很小。
+#
+# RUNPOD BUILD 注意：本镜像约 56 GB，构建需下载 16.1 GB 权重。
+# Runpod 的 docker build 步骤上限 30 分钟 —— 如果超时，见下方 W4A8 开关。
+
+FROM runpod/worker-comfyui:5.10.0-base
+
+ENV HF_HUB_ENABLE_HF_TRANSFER=1
+
+# W4A8=1 时用更小的文本编码器（6.41GB vs 8.71GB），权重总量降到 13.6GB。
+# 构建超时或显存吃紧时可以打开。
+ARG W4A8=0
+
+# ---- 升级 ComfyUI 到 v0.40.0（Qwen-Image-2.1 节点在这里才有）----
+RUN set -eux; \
+    cd /comfyui; \
+    git fetch --tags --force origin; \
+    git checkout -q v0.40.0; \
+    git log -1 --format='%h %ci'; \
+    grep __version__ /comfyui/comfyui_version.py
+
+# ---- 7B Single-Stream DiT，INT8 ConvRot ----
+RUN comfy model download \
+      --url https://huggingface.co/Comfy-Org/Qwen-Image-2.1/resolve/main/diffusion_models/qwen_image_2.1_int8_convrot.safetensors \
+      --relative-path models/diffusion_models \
+      --filename qwen_image_2.1_int8_convrot.safetensors
+
+# ---- Qwen3-VL-8B 文本编码器 ----
+RUN if [ "$W4A8" = "1" ]; then \
+      comfy model download \
+        --url https://huggingface.co/Comfy-Org/Qwen-Image-2.1/resolve/main/text_encoders/qwen3vl_8b_w4a8.safetensors \
+        --relative-path models/text_encoders \
+        --filename qwen3vl_8b_w4a8.safetensors; \
+    else \
+      comfy model download \
+        --url https://huggingface.co/Comfy-Org/Qwen-Image-2.1/resolve/main/text_encoders/qwen3vl_8b_int8_convrot.safetensors \
+        --relative-path models/text_encoders \
+        --filename qwen3vl_8b_int8_convrot.safetensors; \
+    fi
+
+# ---- VAE ----
+RUN comfy model download \
+      --url https://huggingface.co/Comfy-Org/Qwen-Image-2.1/resolve/main/vae/qwen_image_2.1_vae_bf16.safetensors \
+      --relative-path models/vae \
+      --filename qwen_image_2.1_vae_bf16.safetensors
+
+# ---- 自检：权重 + 节点。节点缺失直接构建失败，别等上线才发现 ----
+RUN set -eux; \
+    test -s /comfyui/models/diffusion_models/qwen_image_2.1_int8_convrot.safetensors \
+      || { echo "MISSING: diffusion model"; exit 1; }; \
+    if [ "$W4A8" = "1" ]; then \
+      test -s /comfyui/models/text_encoders/qwen3vl_8b_w4a8.safetensors \
+        || { echo "MISSING: text encoder (w4a8)"; exit 1; }; \
+    else \
+      test -s /comfyui/models/text_encoders/qwen3vl_8b_int8_convrot.safetensors \
+        || { echo "MISSING: text encoder (int8)"; exit 1; }; \
+    fi; \
+    test -s /comfyui/models/vae/qwen_image_2.1_vae_bf16.safetensors \
+      || { echo "MISSING: vae"; exit 1; }; \
+    ls -lh /comfyui/models/diffusion_models/ /comfyui/models/text_encoders/ /comfyui/models/vae/; \
+    echo "--- 节点检查 ---"; \
+    grep -rq "TextEncodeQwenImage21" /comfyui/comfy_extras/ \
+      || { echo "MISSING NODE: TextEncodeQwenImage21 —— ComfyUI 版本不对"; exit 1; }; \
+    grep -rq "QwenImage21Cache" /comfyui/comfy_extras/ \
+      || { echo "MISSING NODE: QwenImage21Cache"; exit 1; }; \
+    echo "自检通过"

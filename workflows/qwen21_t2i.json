@@ -1,0 +1,76 @@
+{
+  "1": {
+    "class_type": "UNETLoader",
+    "inputs": {
+      "unet_name": "qwen_image_2.1_int8_convrot.safetensors",
+      "weight_dtype": "default"
+    },
+    "_meta": { "title": "Load Qwen-Image-2.1 (INT8 ConvRot)" }
+  },
+  "2": {
+    "class_type": "CLIPLoader",
+    "inputs": {
+      "clip_name": "qwen3vl_8b_int8_convrot.safetensors",
+      "type": "qwen_image",
+      "device": "default"
+    },
+    "_meta": { "title": "Load Qwen3-VL-8B text encoder (INT8 ConvRot)" }
+  },
+  "3": {
+    "class_type": "VAELoader",
+    "inputs": { "vae_name": "qwen_image_2.1_vae_bf16.safetensors" },
+    "_meta": { "title": "Load Qwen-Image-2.1 VAE" }
+  },
+  "4": {
+    "class_type": "TextEncodeQwenImage21",
+    "inputs": {
+      "prompt": "a ceramic fox figurine on a blue table, soft window light, shallow depth of field",
+      "negative_prompt": "",
+      "resolution": 1024,
+      "clip": ["2", 0]
+    },
+    "_meta": { "title": "Text Encode (Qwen Image 2.1)" }
+  },
+  "5": {
+    "class_type": "EmptyLatentImage",
+    "inputs": { "width": 1024, "height": 1024, "batch_size": 1 },
+    "_meta": { "title": "Empty Latent Image" }
+  },
+  "6": {
+    "class_type": "QwenImage21Cache",
+    "inputs": { "model": ["1", 0], "device": "auto", "dtype": "default" },
+    "_meta": { "title": "QwenImage21 Cache" }
+  },
+  "7": {
+    "class_type": "KSampler",
+    "inputs": {
+      "seed": 447606998181262,
+      "steps": 25,
+      "cfg": 1.0,
+      "sampler_name": "euler",
+      "scheduler": "simple",
+      "model": ["6", 0],
+      "positive": ["4", 0],
+      "negative": ["4", 0],
+      "latent_image": ["5", 0],
+      "denoise": 1.0
+    },
+    "_meta": { "title": "KSampler" }
+  },
+  "8": {
+    "class_type": "VAEDecode",
+    "inputs": { "samples": ["7", 0], "vae": ["3", 0] },
+    "_meta": { "title": "VAE Decode" }
+  },
+  "9": {
+    "class_type": "SaveImageAdvanced",
+    "inputs": {
+      "images": ["8", 0],
+      "filename_prefix": "qwen21",
+      "format": "png",
+      "bit_depth": "8-bit",
+      "color_space": "sRGB"
+    },
+    "_meta": { "title": "Save Image" }
+  }
+}
