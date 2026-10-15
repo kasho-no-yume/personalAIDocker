@@ -16,6 +16,18 @@ FROM runpod/worker-comfyui:5.10.0-base
 
 ENV HF_HUB_ENABLE_HF_TRANSFER=1
 
+# ---- handler 同步校验 ----
+# 基础镜像自带 Runpod 官方 handler：/handler.py，由 /start.sh（镜像的 CMD）启动，
+# 本镜像直接继承，运行时用的就是它。
+# 仓库根目录另放了一份字节相同的 handler.py，目的是让 Runpod GitHub 集成的仓库扫描
+# 能识别到 handler —— 否则控制台会提示
+# "Could not find runpod.serverless.start() in your repo"。
+# 下面这行保证镜像里那份和仓库里那份不会悄悄走偏；基础镜像换 tag 后这里会失败，
+# 届时把新的 /handler.py 重新拷进仓库根目录即可。
+RUN test "$(sha256sum /handler.py | cut -d' ' -f1)" = \
+      "c43fcc2bfff6cbb60555d7839b902c54de8a9a55ba20caba2bbd3adf9c2886ec" \
+      || { echo "CHANGED: /handler.py —— 基础镜像的 handler 变了，请同步仓库根目录的 handler.py"; exit 1; }
+
 # ---- 扩散模型：Anima 2B (Cosmos-Predict2 DiT + LLM adapter) ----
 RUN comfy model download \
       --url https://huggingface.co/circlestone-labs/Anima/resolve/main/split_files/diffusion_models/anima-base-v1.0.safetensors \

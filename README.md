@@ -20,7 +20,8 @@
 
 ## 在 Runpod 上部署
 
-两个 endpoint 共用这个仓库，**各自指定不同的 Dockerfile 路径**。
+两个 endpoint 共用这个仓库，**各自指定不同的 Dockerfile 路径**：
+anime 用 `/anime/Dockerfile`，qwen21 用 `/qwen21/Dockerfile`。
 
 1. Runpod 控制台 → **Settings → Connections → GitHub** → Connect，授权本仓库
 2. **Serverless → New Endpoint → Import Git Repository** → 选 `personalAIDocker`
@@ -29,7 +30,7 @@
    | 配置项 | 值 |
    |---|---|
    | Branch | `main` |
-   | Dockerfile Path | `Dockerfile.anima` |
+   | Dockerfile Path | `/anime/Dockerfile` |
    | GPU | `AMPERE_16`（RTX A4000 / 2000 Ada 16GB）＋兜底 `AMPERE_24` |
    | Container Disk | **60 GB** |
    | Active / Max Workers | 0 / 2 |
@@ -38,7 +39,7 @@
 
    | 配置项 | 值 |
    |---|---|
-   | Dockerfile Path | `Dockerfile.qwen21` |
+   | Dockerfile Path | `/qwen21/Dockerfile` |
    | GPU | `AMPERE_24`（RTX 3090 / L4 / A5000 24GB）＋兜底 `ADA_24` |
    | Container Disk | **75 GB** |
    | Active / Max Workers | 0 / 2 |
@@ -46,14 +47,26 @@
 > **Container Disk 别开小了。** `runpod/worker-comfyui:5.10.0-base` 解压后是 39.6 GB
 > （Docker Hub 上标的 13.7 GB 是压缩传输大小），加上权重后才到 45 / 56 GB。
 
+### 关于控制台的 "Could not find runpod.serverless.start()" 提示
+
+这条黄条可以忽略，但仓库里已经放好对应文件，正常不会再出现：
+
+- 两个镜像都 `FROM runpod/worker-comfyui:5.10.0-base`，Runpod 官方 handler 就在基础镜像里
+  （`/handler.py`，由镜像 CMD `/start.sh` 启动），不需要我们自己写 handler。
+- 但 Runpod 的 GitHub 集成会**扫仓库里的 Python 代码**判断 endpoint 能不能跑，扫不到就会提示。
+  所以仓库根目录放了一份 `handler.py`，是基础镜像内 `/handler.py` 的**字节级副本**
+  （sha256 `c43fcc2bfff6cbb60555d7839b902c54de8a9a55ba20caba2bbd3adf9c2886ec`），运行时用的还是镜像里那份。
+- 两个 Dockerfile 里各有一行校验，保证镜像里那份和仓库里那份不会走偏；换基础镜像 tag 后
+  这里会构建失败，届时把新的 `/handler.py` 重新拷到仓库根目录即可。
+
 ### 构建注意
 
 Runpod 的 **`docker build` 步骤上限 30 分钟**（整体 160 分钟）。
 
-- `Dockerfile.anima` 要下 5.4 GB 权重 → 需要约 3 MB/s，基本没问题
-- `Dockerfile.qwen21` 要下 16.1 GB 权重 → 需要约 9 MB/s，**有超时风险**
+- `anime/Dockerfile` 要下 5.4 GB 权重 → 需要约 3 MB/s，基本没问题
+- `qwen21/Dockerfile` 要下 16.1 GB 权重 → 需要约 9 MB/s，**有超时风险**
 
-如果 qwen21 构建超时，在仓库里把 `Dockerfile.qwen21` 的 `FROM` 那行改成 `FROM ... AS build` 没用
+如果 qwen21 构建超时，在仓库里把 `qwen21/Dockerfile` 的 `FROM` 那行改成 `FROM ... AS build` 没用
 （不解决时间），正确做法是**打开 W4A8 开关**：把文本编码器从 `qwen3vl_8b_int8_convrot`
 （8.71 GB）换成 `qwen3vl_8b_w4a8`（6.41 GB），权重总量从 16.1 GB 降到 13.6 GB。
 
@@ -65,8 +78,9 @@ Runpod 的 **`docker build` 步骤上限 30 分钟**（整体 160 分钟）。
 ## 目录
 
 ```
-Dockerfile.anima       anime endpoint 镜像
-Dockerfile.qwen21      qwen21 endpoint 镜像
+anime/Dockerfile       anime endpoint 镜像
+qwen21/Dockerfile      qwen21 endpoint 镜像
+handler.py             基础镜像内 /handler.py 的字节级副本（给 Runpod 仓库扫描用，见上）
 MODELS.md              模型清单、采样参数、许可说明、下载链接
 genpic.py              统一客户端（默认 dry-run，加 --send 才真发）
 workflows/
