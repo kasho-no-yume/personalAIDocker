@@ -63,13 +63,10 @@
     "_meta": { "title": "VAE Decode" }
   },
   "9": {
-    "class_type": "SaveImageAdvanced",
+    "class_type": "SaveImage",
     "inputs": {
       "images": ["8", 0],
-      "filename_prefix": "qwen21",
-      "format": "png",
-      "bit_depth": "8-bit",
-      "color_space": "sRGB"
+      "filename_prefix": "qwen21"
     },
     "_meta": { "title": "Save Image" }
   }
