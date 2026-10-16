@@ -43,12 +43,30 @@ RUN test "$(sha256sum /handler.py | cut -d' ' -f1)" = \
 ARG W4A8=0
 
 # ---- 升级 ComfyUI 到 v0.40.0（Qwen-Image-2.1 节点在这里才有）----
+#
+# 换代码必须同时补 Python 依赖！
+# 5.10.0 基础镜像的 site-packages 是按 v0.34.0 装的，而 v0.40.0 抬了这些 pin：
+#   comfy-aimdo  0.4.15 -> 0.5.6      ← storage 子模块是新版才有的
+#   comfy-kitchen 0.2.31 -> 0.2.37
+#   comfyui-frontend-package / workflow-templates / embedded-docs 也都抬了
+# 而 comfy/storage.py 顶层无条件 import comfy_aimdo.storage，所以只 checkout 不装
+# 依赖的后果（2026-10-16 实测踩到）：
+#   ModuleNotFoundError: No module named 'comfy_aimdo.storage'
+#   worker 状态却是 IDLE、unhealthy=0、日志里也有过 "worker is ready"，
+#   只有一发 job 才暴露：ComfyUI server (127.0.0.1:8188) not reachable after multiple retries.
+# torch / torchvision 用 -c 锁成镜像里现有的 CUDA 版本，别让 pip 顺手换掉。
+# （v0.40.0 的 requirements 全是版本 pin 或已满足，实测只会升级上面那几个包，不动 torch。）
 RUN set -eux; \
     cd /comfyui; \
     git fetch --tags --force origin; \
     git checkout -q v0.40.0; \
     git log -1 --format='%h %ci'; \
-    grep __version__ /comfyui/comfyui_version.py
+    grep __version__ /comfyui/comfyui_version.py; \
+    python3 -c 'import torch; print("torch runtime", torch.__version__)'; \
+    { python3 -m pip show torch | awk '/^Version:/{print "torch==" $2}'; \
+      python3 -m pip show torchvision | awk '/^Version:/{print "torchvision==" $2}'; } > /tmp/keep.txt; \
+    cat /tmp/keep.txt; \
+    python3 -m pip install --no-cache-dir -r requirements.txt -c /tmp/keep.txt
 
 # ---- 7B Single-Stream DiT，INT8 ConvRot ----
 RUN comfy model download \
@@ -94,4 +112,8 @@ RUN set -eux; \
       || { echo "MISSING NODE: TextEncodeQwenImage21 —— ComfyUI 版本不对"; exit 1; }; \
     grep -rq "QwenImage21Cache" /comfyui/comfy_extras/ \
       || { echo "MISSING NODE: QwenImage21Cache"; exit 1; }; \
+    echo "--- 依赖导入检查（这一步能挡住「只换代码不装依赖」的坑）---"; \
+    cd /comfyui && python3 -c "import comfy.storage, comfy.utils; print('comfy.storage / comfy.utils 导入 OK')" \
+      || { echo "MISSING DEP: comfy.storage 导不进来 —— 多半是 comfy-aimdo 没升到 v0.40.0 要的版本"; exit 1; }; \
+    python3 -c "import comfy_aimdo, importlib.metadata as m; print('comfy-aimdo', m.version('comfy-aimdo'))"; \
     echo "自检通过"
