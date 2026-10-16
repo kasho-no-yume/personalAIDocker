@@ -100,18 +100,20 @@ def build_anima(args) -> dict:
             else:
                 node["inputs"]["text"] = args.prompt
 
-    # 采样
+    # 图生图：必须走 worker 的上传通道 —— input.images 里放 base64，
+    # LoadImage.inputs.image 指向上传后的文件名。
+    # （原来这里直接把本机路径塞进 LoadImage，worker 容器里没这个文件，必然 invalid image file。）
+    images = []
     if img2i:
-        graph["4"]["inputs"]["image"] = args.image
-        for node in graph.values():
-            if node.get("class_type") == "EmptyLatentImage":
-                node["inputs"].pop("width", None)
-                node["inputs"].pop("height", None)
-    else:
-        for node in graph.values():
-            if node.get("class_type") == "EmptyLatentImage":
-                node["inputs"]["width"] = args.width
-                node["inputs"]["height"] = args.height
+        item = encode_image(args.image)
+        graph["4"]["inputs"]["image"] = item["name"]
+        images = [item]
+
+    # 尺寸（img2img 工作流没有 EmptyLatentImage，这个循环对它是空操作）
+    for node in graph.values():
+        if node.get("class_type") == "EmptyLatentImage":
+            node["inputs"]["width"] = args.width
+            node["inputs"]["height"] = args.height
 
     for node in graph.values():
         if node.get("class_type") == "KSampler":
@@ -136,7 +138,10 @@ def build_anima(args) -> dict:
             if node.get("class_type") == "KSampler":
                 node["inputs"]["model"] = [lora_id, 0]
 
-    return {"input": {"workflow": set_seed(graph, args.seed)}}
+    payload = {"input": {"workflow": set_seed(graph, args.seed)}}
+    if images:
+        payload["input"]["images"] = images
+    return payload
 
 
 # --------------------------------------------------------------------------- qwen

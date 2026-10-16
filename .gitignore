@@ -1,0 +1,6 @@
+﻿__pycache__/
+*.pyc
+logs/
+outputs/
+genpic_gui_config.json
+

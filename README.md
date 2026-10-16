@@ -83,6 +83,7 @@ qwen21/Dockerfile      qwen21 endpoint 镜像
 handler.py             基础镜像内 /handler.py 的字节级副本（给 Runpod 仓库扫描用，见上）
 MODELS.md              模型清单、采样参数、许可说明、下载链接
 genpic.py              统一客户端（默认 dry-run，加 --send 才真发）
+genpic_gui.py          GUI 请求器（tkinter）——请求/响应/报错全部落盘，失败自动抓 worker 日志
 workflows/
   anime_t2i.json         Anima 文生图        (ComfyUI API 格式)
   anime_img2img.json     Anima 图生图
