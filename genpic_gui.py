@@ -69,11 +69,17 @@ TERMINAL = {"COMPLETED", "FAILED", "CANCELLED", "TIMED_OUT"}
 
 # 默认值跟 genpic.py 的 argparse 保持一致
 DEFAULTS = {
-    "anima": dict(width=1024, height=1024, steps=None, cfg=None, denoise=0.6,
+    "anima": dict(width=1024, height=1024, steps=30, cfg=4.0, denoise=0.6,
+                  turbo_steps=8, turbo_cfg=1.0,
                   model="anima-base-v1.0.safetensors", turbo_lora="anima-turbo-lora-v0.2.safetensors"),
-    "qwen21": dict(width=1024, height=1024, steps=None, cfg=None, resolution=1024,
+    "qwen21": dict(width=1024, height=1024, steps=25, cfg=1.0, resolution=1024,
                    model="qwen_image_2.1_int8_convrot.safetensors"),
 }
+
+# 宽/高：ComfyUI 要求 8 的倍数，这里按 64 步长规整。
+# 下限 256 是「能看出东西」的最小尺寸；上限 2048 = Qwen-Image-2.1 的原生 2K，
+# 再往上在 16/24GB 卡上就是显存自杀（权重本身已经吃掉 16GB）。
+DIM_MIN, DIM_MAX, DIM_STEP = 256, 2048, 64
 
 PRESETS = {
     "anima": {
@@ -270,6 +276,67 @@ class Api:
 
 # =========================================================================== GUI
 
+class DimControl:
+    """宽/高控件：数字输入框 + 滑块，双向同步。
+
+    值一律规整到 DIM_STEP 的倍数并夹在 [DIM_MIN, DIM_MAX]：
+    - 拖滑块 -> 输入框立刻跟着变（规整后的整数）
+    - 输入框里打字 -> 只有落在范围内才推给滑块；按回车 / 失焦时规整并回写
+    """
+
+    def __init__(self, parent, label: str, var: tk.StringVar) -> None:
+        self.var = var
+        self.guard = False
+        self.int = tk.IntVar(value=self._norm(var.get()))
+        self.frame = ttk.Frame(parent)
+        ttk.Label(self.frame, text=label, width=3).pack(side="left")
+        self.entry = ttk.Entry(self.frame, textvariable=var, width=6)
+        self.entry.pack(side="left", padx=(0, 6))
+        self.scale = ttk.Scale(self.frame, from_=DIM_MIN, to=DIM_MAX, orient="horizontal",
+                               variable=self.int, length=190, command=self._from_scale)
+        self.scale.pack(side="left")
+        var.trace_add("write", self._from_entry)
+        self.entry.bind("<Return>", self._commit)
+        self.entry.bind("<FocusOut>", self._commit)
+
+    @staticmethod
+    def _norm(raw) -> int:
+        try:
+            n = int(str(raw).strip())
+        except (TypeError, ValueError):
+            n = 1024
+        n = max(DIM_MIN, min(DIM_MAX, n))
+        return int(round(n / DIM_STEP) * DIM_STEP)
+
+    def _set_var(self, n: int) -> None:
+        self.guard = True
+        self.var.set(str(n))
+        self.guard = False
+
+    def _from_scale(self, _=None) -> None:
+        if not self.guard:
+            self._set_var(self._norm(self.int.get()))
+
+    def _from_entry(self, *_args) -> None:
+        if self.guard:
+            return
+        try:
+            n = int(self.var.get().strip())
+        except ValueError:
+            return
+        if DIM_MIN <= n <= DIM_MAX:
+            self.int.set(n)
+
+    def _commit(self, _=None) -> None:
+        n = self._norm(self.var.get())
+        self._set_var(n)
+        self.int.set(n)
+
+    def value(self) -> int:
+        self._commit()
+        return int(self.var.get())
+
+
 class App(tk.Tk):
     def __init__(self) -> None:
         super().__init__()
@@ -306,8 +373,6 @@ class App(tk.Tk):
         self.endpoint = tk.StringVar()
         self.key = tk.StringVar(value=os.environ.get("RUNPOD_API_KEY", "") or cfg.get("key", ""))
         self.remember_key = tk.BooleanVar(value=bool(cfg.get("remember_key")))
-        self.prompt = tk.StringVar()
-        self.negative = tk.StringVar()
         self.width = tk.StringVar(value="1024")
         self.height = tk.StringVar(value="1024")
         self.steps = tk.StringVar(value="")
@@ -331,16 +396,18 @@ class App(tk.Tk):
         cfg = cfg or {}
         self.engine.set(engine)
         self.endpoint.set(cfg.get("endpoint_id", {}).get(engine, p["endpoint_id"]) if cfg else p["endpoint_id"])
-        self.prompt.set(p["prompt"])
-        self.negative.set(p["negative"])
+        if hasattr(self, "prompt_text"):
+            self._set_text(self.prompt_text, p["prompt"])
+            self._set_text(self.negative_text, p["negative"])
         self.width.set(str(d["width"]))
         self.height.set(str(d["height"]))
-        self.steps.set("" if d["steps"] is None else str(d["steps"]))
-        self.cfgv.set("" if d["cfg"] is None else str(d["cfg"]))
+        self.steps.set(str(d["steps"]))
+        self.cfgv.set(str(d["cfg"]))
         self.seed.set("")
         self.denoise.set(str(d.get("denoise", 0.6)))
         self.resolution.set(str(d.get("resolution", 1024)))
         self.model.set(d["model"])
+        self.turbo.set(False)
         self.images = []
         if hasattr(self, "img_list"):
             self._refresh_images()
@@ -388,32 +455,47 @@ class App(tk.Tk):
         pf.pack(fill="x")
 
         ttk.Label(pf, text="Prompt").grid(row=0, column=0, sticky="nw", pady=2)
-        ttk.Entry(pf, textvariable=self.prompt, width=46).grid(row=0, column=1, sticky="we", pady=2)
+        self.prompt_text = tk.Text(pf, height=4, width=52, wrap="word", font=("Consolas", 9))
+        self.prompt_text.grid(row=0, column=1, sticky="we", pady=2)
         ttk.Label(pf, text="Negative").grid(row=1, column=0, sticky="nw", pady=2)
-        ttk.Entry(pf, textvariable=self.negative, width=46).grid(row=1, column=1, sticky="we", pady=2)
+        self.negative_text = tk.Text(pf, height=2, width=52, wrap="word", font=("Consolas", 9))
+        self.negative_text.grid(row=1, column=1, sticky="we", pady=2)
 
+        ttk.Label(pf, text="尺寸", foreground="#555").grid(row=2, column=0, sticky="nw", pady=(6, 0))
         dims = ttk.Frame(pf)
-        dims.grid(row=2, column=0, columnspan=2, sticky="we", pady=(6, 0))
-        for i, (label, var, w) in enumerate([
-            ("宽", self.width, 6), ("高", self.height, 6), ("steps", self.steps, 6), ("cfg", self.cfgv, 6),
-        ]):
-            ttk.Label(dims, text=label).grid(row=0, column=i * 2, sticky="e")
-            ttk.Entry(dims, textvariable=var, width=w).grid(row=0, column=i * 2 + 1, padx=(2, 8))
+        dims.grid(row=2, column=1, sticky="we", pady=(6, 0))
+        self.dim_w = DimControl(dims, "宽", self.width)
+        self.dim_w.frame.pack(anchor="w")
+        self.dim_h = DimControl(dims, "高", self.height)
+        self.dim_h.frame.pack(anchor="w", pady=(2, 0))
+        ttk.Label(dims, text=f"{DIM_MIN}~{DIM_MAX}，{DIM_STEP} 的倍数；1MP≈1024×1024，越大越慢越吃显存",
+                  foreground="#777").pack(anchor="w", pady=(2, 0))
 
         dims2 = ttk.Frame(pf)
-        dims2.grid(row=3, column=0, columnspan=2, sticky="we", pady=4)
-        ttk.Label(dims2, text="seed").grid(row=0, column=0, sticky="e")
-        ttk.Entry(dims2, textvariable=self.seed, width=8).grid(row=0, column=1, padx=(2, 2))
-        ttk.Button(dims2, text="随机", width=5, command=self._random_seed).grid(row=0, column=2, padx=(0, 8))
-        ttk.Label(dims2, text="denoise").grid(row=0, column=3, sticky="e")
-        ttk.Entry(dims2, textvariable=self.denoise, width=6).grid(row=0, column=4, padx=(2, 8))
-        ttk.Label(dims2, text="resolution").grid(row=0, column=5, sticky="e")
-        ttk.Entry(dims2, textvariable=self.resolution, width=6).grid(row=0, column=6, padx=(2, 8))
+        dims2.grid(row=3, column=0, columnspan=2, sticky="we", pady=(6, 2))
+        ttk.Label(dims2, text="steps").grid(row=0, column=0, sticky="e")
+        ttk.Entry(dims2, textvariable=self.steps, width=6).grid(row=0, column=1, padx=(2, 8))
+        ttk.Label(dims2, text="cfg").grid(row=0, column=2, sticky="e")
+        ttk.Entry(dims2, textvariable=self.cfgv, width=6).grid(row=0, column=3, padx=(2, 8))
+        ttk.Label(dims2, text="seed").grid(row=0, column=4, sticky="e")
+        ttk.Entry(dims2, textvariable=self.seed, width=8).grid(row=0, column=5, padx=(2, 2))
+        ttk.Button(dims2, text="随机", width=5, command=self._random_seed).grid(row=0, column=6, padx=(0, 8))
 
-        ttk.Label(pf, text="model").grid(row=4, column=0, sticky="e", pady=2)
-        ttk.Entry(pf, textvariable=self.model, width=46).grid(row=4, column=1, sticky="we", pady=2)
+        dims3 = ttk.Frame(pf)
+        dims3.grid(row=4, column=0, columnspan=2, sticky="we", pady=2)
+        ttk.Label(dims3, text="denoise").grid(row=0, column=0, sticky="e")
+        ttk.Entry(dims3, textvariable=self.denoise, width=6).grid(row=0, column=1, padx=(2, 8))
+        ttk.Label(dims3, text="resolution").grid(row=0, column=2, sticky="e")
+        ttk.Entry(dims3, textvariable=self.resolution, width=6).grid(row=0, column=3, padx=(2, 8))
+        ttk.Label(dims3, text="(denoise 仅 img2img；resolution 是参考图预处理预算)",
+                  foreground="#777").grid(row=0, column=4, sticky="w")
+
+        ttk.Label(pf, text="model").grid(row=5, column=0, sticky="e", pady=2)
+        ttk.Entry(pf, textvariable=self.model, width=52).grid(row=5, column=1, sticky="we", pady=2)
         ttk.Checkbutton(pf, text="turbo（anima：8 步 / CFG 1，需镜像内有 turbo LoRA）",
-                        variable=self.turbo).grid(row=5, column=0, columnspan=2, sticky="w")
+                        variable=self.turbo, command=self._on_turbo).grid(
+            row=6, column=0, columnspan=2, sticky="w")
+        pf.columnconfigure(1, weight=1)
 
         # ---- 左：参考图
         gf = ttk.LabelFrame(left, text="参考图（anima 最多 1 张；qwen21 1~10 张）", padding=8)
@@ -483,6 +565,7 @@ class App(tk.Tk):
         ttk.Button(lrow, text="打开日志目录", command=self._open_logs).pack(side="left")
 
         self._sync_widgets()
+        self._apply_preset(self.engine.get())      # 文本框建好之后再把预设内容填进去
 
     def _open_logs(self) -> None:
         try:
@@ -493,6 +576,32 @@ class App(tk.Tk):
     # ------------------------------------------------------------ 小动作
     def _on_engine(self) -> None:
         self._apply_preset(self.engine.get())
+
+    # ------------------------------------------------------------ 文本框/联动
+    @staticmethod
+    def _get_text(widget) -> str:
+        return widget.get("1.0", "end").strip()
+
+    @staticmethod
+    def _set_text(widget, text: str) -> None:
+        widget.delete("1.0", "end")
+        widget.insert("1.0", text)
+
+    def _on_turbo(self) -> None:
+        d = DEFAULTS["anima"]
+        if self.engine.get() != "anima":
+            if self.turbo.get():
+                self.turbo.set(False)
+                self.log("turbo 只对 anima 有意义（要用镜像里的 Anima turbo LoRA）", "err")
+            return
+        if self.turbo.get():
+            self.steps.set(str(d["turbo_steps"]))
+            self.cfgv.set(str(d["turbo_cfg"]))
+            self.log(f"turbo 开 → steps {d['turbo_steps']} / CFG {d['turbo_cfg']}（采样步数变少，画风会变）")
+        else:
+            self.steps.set(str(d["steps"]))
+            self.cfgv.set(str(d["cfg"]))
+            self.log(f"turbo 关 → steps {d['steps']} / CFG {d['cfg']}")
 
     def _random_seed(self) -> None:
         import secrets
@@ -573,41 +682,44 @@ class App(tk.Tk):
         engine = self.engine.get()
         if not self.endpoint.get().strip():
             raise ValueError("Endpoint ID 是空的")
-        prompt = self.prompt.get().strip()
+        prompt = self._get_text(self.prompt_text)
         if not prompt:
             raise ValueError("Prompt 是空的")
 
-        def num(var, name, cast, allow_blank=True):
+        def num(var, name, cast, default=None):
+            """空 -> default（steps/cfg 这类给默认值）；填了就必须是合法数字。"""
             raw = var.get().strip()
             if not raw:
-                if allow_blank:
-                    return None
-                raise ValueError(f"{name} 不能为空")
+                return default
             try:
                 return cast(raw)
             except ValueError:
                 raise ValueError(f"{name} 不是合法数字：{raw!r}") from None
 
-        seed = num(self.seed, "seed", int) 
+        d = DEFAULTS[engine]
+        seed = num(self.seed, "seed", int)
         if seed is None:
             import secrets
             seed = secrets.randbits(53)
             self.seed.set(str(seed))
 
+        width, height = self.dim_w.value(), self.dim_h.value()
+        negative = self._get_text(self.negative_text)
+
         if engine == "anima":
             args = argparse.Namespace(
                 which="anime",
                 prompt=prompt,
-                negative=self.negative.get().strip(),
+                negative=negative,
                 image=(self.images[0] if self.images else None),
-                width=num(self.width, "宽", int, allow_blank=False),
-                height=num(self.height, "高", int, allow_blank=False),
-                steps=num(self.steps, "steps", int),
-                cfg=num(self.cfgv, "cfg", float),
-                denoise=float(self.denoise.get() or 0.6),
-                model=self.model.get().strip() or DEFAULTS["anima"]["model"],
+                width=width,
+                height=height,
+                steps=num(self.steps, "steps", int, d["steps"]),
+                cfg=num(self.cfgv, "cfg", float, d["cfg"]),
+                denoise=num(self.denoise, "denoise", float, d["denoise"]),
+                model=self.model.get().strip() or d["model"],
                 turbo=self.turbo.get(),
-                turbo_lora=DEFAULTS["anima"]["turbo_lora"],
+                turbo_lora=d["turbo_lora"],
                 seed=seed,
             )
             return genpic.build_anima(args)
@@ -615,14 +727,14 @@ class App(tk.Tk):
         args = argparse.Namespace(
             which="qwen",
             prompt=prompt,
-            negative=self.negative.get().strip(),
+            negative=negative,
             image=list(self.images),
-            width=num(self.width, "宽", int, allow_blank=False),
-            height=num(self.height, "高", int, allow_blank=False),
-            resolution=num(self.resolution, "resolution", int, allow_blank=False) or 1024,
-            steps=num(self.steps, "steps", int),
-            cfg=num(self.cfgv, "cfg", float),
-            model=self.model.get().strip() or DEFAULTS["qwen21"]["model"],
+            width=width,
+            height=height,
+            resolution=num(self.resolution, "resolution", int, 1024) or 1024,
+            steps=num(self.steps, "steps", int, d["steps"]),
+            cfg=num(self.cfgv, "cfg", float, d["cfg"]),
+            model=self.model.get().strip() or d["model"],
             seed=seed,
         )
         return genpic.build_qwen(args)
@@ -1089,6 +1201,28 @@ def selftest() -> int:
 
     app = App()          # 只建对象，不进 mainloop
     app.update_idletasks()
+
+    # 默认值 / 尺寸控件 / 文本框是否都到位
+    print(f"  默认 steps={app.steps.get()} cfg={app.cfgv.get()} "
+          f"prompt={len(app._get_text(app.prompt_text))} 字符 "
+          f"width={app.dim_w.value()} height={app.dim_h.value()}")
+    ok &= app.steps.get() not in ("", "None") and app.cfgv.get() not in ("", "None")
+    ok &= len(app._get_text(app.prompt_text)) > 0
+    ok &= app.dim_w.value() == 1024
+
+    for raw, want in (("1000", 1024), ("100", DIM_MIN), ("9999", DIM_MAX), ("512", 512), ("abc", 1024)):
+        app.width.set(raw)
+        got = app.dim_w.value()
+        flag = "OK" if got == want else "FAIL"
+        ok &= got == want
+        print(f"  宽度规整 {raw!r:8s} -> {got:5d} (期望 {want})  {flag}")
+    app.width.set("1024")
+
+    p = app._build_payload()
+    w = [v["inputs"]["width"] for v in p["input"]["workflow"].values()
+         if v.get("class_type") == "EmptyLatentImage"]
+    print(f"  用界面默认值构造 payload：nodes={len(p['input']['workflow'])} EmptyLatentImage.width={w}")
+    ok &= w == [1024]
     app.destroy()
     print(f"  界面对象构建 OK；日志目录 {LOGS}")
     print("SELFTEST", "OK" if ok else "FAILED")
